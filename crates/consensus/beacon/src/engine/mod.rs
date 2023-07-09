@@ -590,6 +590,8 @@ where
             return Ok(OnForkChoiceUpdated::syncing())
         }
 
+        // TODO(clabby): Allow proposers to reorg their own chain
+
         let status = match self.blockchain.make_canonical(&state.head_block_hash) {
             Ok(outcome) => {
                 if !outcome.is_already_canonical() {
@@ -602,6 +604,13 @@ where
                 }
 
                 if let Some(attrs) = attrs {
+                    // TODO(clabby): We should only do this if the chainspec has an optimism
+                    // config. Does this belong here?
+                    #[cfg(feature = "optimism")]
+                    if attrs.gas_limit.is_none() {
+                        return Ok(OnForkChoiceUpdated::invalid_payload_attributes())
+                    }
+
                     // the CL requested to build a new payload on top of this new VALID head
                     let payload_response = self.process_payload_attributes(
                         attrs,
@@ -800,27 +809,30 @@ where
         //    forkchoiceState.headBlockHash and identified via buildProcessId value if
         //    payloadAttributes is not null and the forkchoice state has been updated successfully.
         //    The build process is specified in the Payload building section.
-        let attributes = PayloadBuilderAttributes::new(state.head_block_hash, attrs);
+        match PayloadBuilderAttributes::try_new(state.head_block_hash, attrs) {
+            Ok(attributes) => {
+                // send the payload to the builder and return the receiver for the pending payload
+                // id, initiating payload job is handled asynchronously
+                let pending_payload_id = self.payload_builder.send_new_payload(attributes);
 
-        // send the payload to the builder and return the receiver for the pending payload id,
-        // initiating payload job is handled asynchronously
-        let pending_payload_id = self.payload_builder.send_new_payload(attributes);
-
-        // Client software MUST respond to this method call in the following way:
-        // {
-        //      payloadStatus: {
-        //          status: VALID,
-        //          latestValidHash: forkchoiceState.headBlockHash,
-        //          validationError: null
-        //      },
-        //      payloadId: buildProcessId
-        // }
-        //
-        // if the payload is deemed VALID and the build process has begun.
-        OnForkChoiceUpdated::updated_with_pending_payload_id(
-            PayloadStatus::new(PayloadStatusEnum::Valid, Some(state.head_block_hash)),
-            pending_payload_id,
-        )
+                // Client software MUST respond to this method call in the following way:
+                // {
+                //      payloadStatus: {
+                //          status: VALID,
+                //          latestValidHash: forkchoiceState.headBlockHash,
+                //          validationError: null
+                //      },
+                //      payloadId: buildProcessId
+                // }
+                //
+                // if the payload is deemed VALID and the build process has begun.
+                OnForkChoiceUpdated::updated_with_pending_payload_id(
+                    PayloadStatus::new(PayloadStatusEnum::Valid, Some(state.head_block_hash)),
+                    pending_payload_id,
+                )
+            }
+            Err(_) => OnForkChoiceUpdated::invalid_payload_attributes(),
+        }
     }
 
     /// When the Consensus layer receives a new block via the consensus gossip protocol,
