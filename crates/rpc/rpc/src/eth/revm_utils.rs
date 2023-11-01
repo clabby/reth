@@ -1,6 +1,7 @@
 //! utilities for working with revm
 
 use crate::eth::error::{EthApiError, EthResult, RpcInvalidTransactionError};
+use alloy_rlp::Encodable;
 use reth_primitives::{
     revm::env::{fill_tx_env, fill_tx_env_with_recovered},
     Address, TransactionSigned, TransactionSignedEcRecovered, TxHash, B256, U256,
@@ -20,6 +21,9 @@ use revm_primitives::{
     Bytecode,
 };
 use tracing::trace;
+
+#[cfg(feature = "optimism")]
+use alloy_primitives::Bytes;
 
 /// Helper type that bundles various overrides for EVM Execution.
 ///
@@ -284,6 +288,9 @@ pub(crate) fn create_txn_env(block_env: &BlockEnv, request: CallRequest) -> EthR
         return Err(RpcInvalidTransactionError::BlobTransactionMissingBlobHashes.into())
     }
 
+    #[cfg(feature = "optimism")]
+    let enveloped_tx = envelope_encode_call_request(&request)?;
+
     let CallRequest {
         from,
         to,
@@ -313,6 +320,9 @@ pub(crate) fn create_txn_env(block_env: &BlockEnv, request: CallRequest) -> EthR
         )?;
 
     let gas_limit = gas.unwrap_or(block_env.gas_limit.min(U256::from(u64::MAX)));
+    let input = input.try_into_unique_input()?.unwrap_or_default();
+    let flattened_access_list =
+        access_list.map(reth_rpc_types::AccessList::into_flattened).unwrap_or_default();
     let env = TxEnv {
         gas_limit: gas_limit.try_into().map_err(|_| RpcInvalidTransactionError::GasUintOverflow)?,
         nonce: nonce
@@ -323,16 +333,19 @@ pub(crate) fn create_txn_env(block_env: &BlockEnv, request: CallRequest) -> EthR
         gas_priority_fee: max_priority_fee_per_gas,
         transact_to: to.map(TransactTo::Call).unwrap_or_else(TransactTo::create),
         value: value.unwrap_or_default(),
-        data: input.try_into_unique_input()?.unwrap_or_default(),
+        data: input,
         chain_id: chain_id.map(|c| c.to()),
-        access_list: access_list
-            .map(reth_rpc_types::AccessList::into_flattened)
-            .unwrap_or_default(),
+        access_list: flattened_access_list,
         // EIP-4844 fields
         blob_hashes: blob_versioned_hashes.unwrap_or_default(),
         max_fee_per_blob_gas,
         #[cfg(feature = "optimism")]
-        optimism: Default::default(),
+        optimism: revm_primitives::OptimismFields {
+            source_hash: None,
+            mint: None,
+            is_system_transaction: Some(false),
+            enveloped_tx: Some(enveloped_tx),
+        },
     };
 
     Ok(env)
@@ -598,6 +611,92 @@ where
         block_hashes: db.block_hashes.clone(),
         db: Default::default(),
     }
+}
+
+#[cfg(feature = "optimism")]
+fn envelope_encode_call_request(request: &CallRequest) -> EthResult<Bytes> {
+    let input = request.input.input.clone().unwrap_or_default();
+    let chain_id = request.chain_id.map(|c| u64::from_be_bytes(c.to_be_bytes()));
+    let nonce = request.nonce.map(|n| u64::from_be_bytes(n.to_be_bytes())).unwrap_or(0);
+    let gas_price = request.gas_price.map(|g| u128::from_be_bytes(g.to_be_bytes())).unwrap_or(0);
+    let gas_limit = request.gas.map(|g| u64::from_be_bytes(g.to_be_bytes())).unwrap_or(0);
+    let to = if let Some(to) = request.to {
+        reth_primitives::TransactionKind::Call(to)
+    } else {
+        reth_primitives::TransactionKind::Create
+    };
+    let value = request.value.map(reth_primitives::TxValue::from).unwrap_or_default();
+    let access_list = request.access_list.clone().map(|al| {
+        let access_list =
+            al.0.iter()
+                .map(|ali| reth_primitives::AccessListItem {
+                    address: ali.address,
+                    storage_keys: ali.storage_keys.clone(),
+                })
+                .collect::<Vec<_>>();
+        reth_primitives::AccessList(access_list)
+    });
+    let max_fee_per_gas = request.max_fee_per_gas.map(|g| u128::from_be_bytes(g.to_be_bytes()));
+    let max_priority_fee_per_gas =
+        request.max_priority_fee_per_gas.map(|g| u128::from_be_bytes(g.to_be_bytes()));
+
+    let tx = match request.transaction_type.map(|v| u8::from_be_bytes(v.to_be_bytes())).unwrap_or(2)
+    {
+        0 => reth_primitives::Transaction::Legacy(reth_primitives::TxLegacy {
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+        }),
+        1 => reth_primitives::Transaction::Eip2930(reth_primitives::TxEip2930 {
+            chain_id: chain_id.unwrap_or_default(),
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+            access_list: access_list.unwrap_or_default(),
+        }),
+        2 => reth_primitives::Transaction::Eip1559(reth_primitives::TxEip1559 {
+            chain_id: chain_id.unwrap_or_default(),
+            nonce,
+            gas_limit,
+            to,
+            value,
+            input,
+            access_list: access_list.unwrap_or_default(),
+            max_fee_per_gas: max_fee_per_gas.unwrap_or_default(),
+            max_priority_fee_per_gas: max_priority_fee_per_gas.unwrap_or_default(),
+        }),
+        3 => reth_primitives::Transaction::Eip4844(reth_primitives::TxEip4844 {
+            chain_id: chain_id.unwrap_or_default(),
+            nonce,
+            gas_limit,
+            max_fee_per_gas: max_fee_per_gas.unwrap_or_default(),
+            max_priority_fee_per_gas: max_priority_fee_per_gas.unwrap_or_default(),
+            to,
+            value,
+            access_list: access_list.unwrap_or_default(),
+            blob_versioned_hashes: request.blob_versioned_hashes.clone().unwrap_or_default(),
+            max_fee_per_blob_gas: request
+                .max_fee_per_blob_gas
+                .map(|g| u128::from_be_bytes(g.to_be_bytes()))
+                .unwrap_or_default(),
+            input,
+        }),
+        _ => {
+            return Err(EthApiError::InvalidTransaction(
+                RpcInvalidTransactionError::TxTypeNotSupported,
+            ))
+        }
+    };
+    let mut envelope_buf = bytes::BytesMut::with_capacity(tx.length());
+    tx.encode_with_signature(&reth_primitives::Signature::default(), &mut envelope_buf, false);
+    Ok(envelope_buf.freeze().into())
 }
 
 #[cfg(test)]
