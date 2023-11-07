@@ -274,6 +274,8 @@ pub static OP_GOERLI: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
             ),
             (Hardfork::Bedrock, ForkCondition::Block(4061224)),
             (Hardfork::Regolith, ForkCondition::Timestamp(1679079600)),
+            (Hardfork::Shanghai, ForkCondition::Timestamp(1699981200)),
+            (Hardfork::Canyon, ForkCondition::Timestamp(1699981200)),
         ]),
         base_fee_params: BaseFeeParams::optimism(),
         prune_delete_limit: 1700,
@@ -315,6 +317,8 @@ pub static BASE_GOERLI: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
             ),
             (Hardfork::Bedrock, ForkCondition::Block(0)),
             (Hardfork::Regolith, ForkCondition::Timestamp(1683219600)),
+            (Hardfork::Shanghai, ForkCondition::Timestamp(1699981200)),
+            (Hardfork::Canyon, ForkCondition::Timestamp(1699981200)),
         ]),
         base_fee_params: BaseFeeParams::optimism_goerli(),
         prune_delete_limit: 1700,
@@ -668,7 +672,7 @@ impl ChainSpec {
                 } else {
                     // we can return here because this block fork is not active, so we set the
                     // `next` value
-                    return ForkId { hash: forkhash, next: block }
+                    return ForkId { hash: forkhash, next: block };
                 }
             }
         }
@@ -689,7 +693,7 @@ impl ChainSpec {
                 // can safely return here because we have already handled all block forks and
                 // have handled all active timestamp forks, and set the next value to the
                 // timestamp that is known but not active yet
-                return ForkId { hash: forkhash, next: timestamp }
+                return ForkId { hash: forkhash, next: timestamp };
             }
         }
 
@@ -704,7 +708,7 @@ impl ChainSpec {
                 // to satisfy every timestamp ForkCondition, we find the last ForkCondition::Block
                 // if one exists, and include its block_num in the returned Head
                 if let Some(last_block_num) = self.last_block_fork_before_merge_or_timestamp() {
-                    return Head { timestamp, number: last_block_num, ..Default::default() }
+                    return Head { timestamp, number: last_block_num, ..Default::default() };
                 }
                 Head { timestamp, ..Default::default() }
             }
@@ -732,17 +736,17 @@ impl ChainSpec {
                     ForkCondition::TTD { fork_block, .. } => {
                         // handle Sepolia merge netsplit case
                         if fork_block.is_some() {
-                            return *fork_block
+                            return *fork_block;
                         }
                         // ensure curr_cond is indeed ForkCondition::Block and return block_num
                         if let ForkCondition::Block(block_num) = curr_cond {
-                            return Some(block_num)
+                            return Some(block_num);
                         }
                     }
                     ForkCondition::Timestamp(_) => {
                         // ensure curr_cond is indeed ForkCondition::Block and return block_num
                         if let ForkCondition::Block(block_num) = curr_cond {
-                            return Some(block_num)
+                            return Some(block_num);
                         }
                     }
                     ForkCondition::Block(_) | ForkCondition::Never => continue,
@@ -1032,13 +1036,20 @@ impl ChainSpecBuilder {
         self
     }
 
-    /// Enable Regolith at the timestamp of activation.
-    /// For post-bedrock op-stack chains, this will be at genesis.
-    /// For pre-bedrock op-stack chains, this will be at the timestamp of regolith activation.
+    /// Enable Regolith at genesis.
     #[cfg(feature = "optimism")]
     pub fn regolith_activated(mut self) -> Self {
         self = self.bedrock_activated();
         self.hardforks.insert(Hardfork::Regolith, ForkCondition::Timestamp(0));
+        self
+    }
+
+    /// Enable Canyon at genesis. Canyon enables the `Shanghai` hardfork alongside it.
+    #[cfg(feature = "optimism")]
+    pub fn canyon_activated(mut self) -> Self {
+        self = self.regolith_activated();
+        self.hardforks.insert(Hardfork::Shanghai, ForkCondition::Timestamp(0));
+        self.hardforks.insert(Hardfork::Canyon, ForkCondition::Timestamp(0));
         self
     }
 
