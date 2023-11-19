@@ -92,6 +92,12 @@ impl Signature {
         let v = u64::decode(buf)?;
         let r = Decodable::decode(buf)?;
         let s = Decodable::decode(buf)?;
+
+        // MONKEYPATCH: Decoding legacy Optimism deposit transactions.
+        if r == U256::ZERO && s == U256::ZERO {
+            return Ok((Signature { r: U256::ZERO, s: U256::ZERO, odd_y_parity: false }, None))
+        }
+
         if v >= 35 {
             // EIP-155: v = {0, 1} + CHAIN_ID * 2 + 35
             let odd_y_parity = ((v - 35) % 2) != 0;
